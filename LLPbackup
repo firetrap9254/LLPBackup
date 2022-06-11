@@ -1,0 +1,134 @@
+#!/usr/bin/bash
+
+##Define looping variables
+#Looping for all tickets uses $i
+i=0
+#Looping for renaming downloads uses $x
+x=1
+#Looping for all documents uses $a
+a=0
+#Looping for renaming documents uses $b
+b=1
+#URL stem for fetching tickets $urlbase
+urlbase=https://lifelong.rcoa.ac.uk/formSubmission?page=
+#Looping for page count of ticket downloads $page
+page=1
+#URL stem for fetching documents $docbase
+docbase=https://lifelong.rcoa.ac.uk/documents?page=
+#Looping for page count of document downloads $dp
+dp=1
+
+#Ensure no remnant files from a previous execution
+rm -f tickets.txt
+rm -f docst.txt
+rm -f arcp.txt
+
+#
+##
+###If you've imported your own cookies, or decide to hardcode your login details, you can blank out the below lines
+##
+#
+
+#Prompt for login details, or uncomment $email and $password to hardcode
+read -p "Enter email address: " email
+read -p "Enter password: " password
+#email=
+#password=
+
+#Generate fresh cookies, and scrape the token
+token=$(echo $(curl 'https://lifelong.rcoa.ac.uk/login' -c cookies.txt | sed -En "s/<meta name=\"csrf-token\" content=\"(.*)\">/\1/p"))
+
+#Send the token, along with the entered username and password
+curl 'https://lifelong.rcoa.ac.uk/login' -b cookies.txt -c cookies.txt -X POST -H 'Content-Type: application/x-www-form-urlencoded' -H 'Referer: https://lifelong.rcoa.ac.uk/login' --data-raw "_token=$token&email=$email&password=$password&remember=on"
+
+#
+##
+###Stop commenting out here to avoid generating your own cookies
+##
+#
+
+#We generate a list of all submitted assessments, and tickets, saving to tickets.txt; cycling until end of assessment library reached
+while [ $i -le 0 ]
+do
+content=$(curl -f --cookie cookies.txt $urlbase$page)
+grep -Eo "https://lifelong.rcoa.ac.uk/formSubmission/\S+?\"" <<< $content >> tickets.txt
+grep -Eo "https://lifelong.rcoa.ac.uk/pdp/\S+?\"" <<< $content >> tickets.txt
+((page++))
+if echo "$content" | grep -q "No form submissions to display"; then
+((i++))
+fi
+done
+
+#We fetch the ESSR records, which are kept seperately - I don't have enough ESSRs to know when it might push into a second page/how this is handled. We append this to tickets.txt again
+content=$(curl -f --cookie cookies.txt https://lifelong.rcoa.ac.uk/essr)
+grep -Eo "https://lifelong.rcoa.ac.uk/essr/\S+?\"" <<< $content >> tickets.txt
+sed -i '/https:\/\/lifelong.rcoa.ac.uk\/essr\/create/d' tickets.txt
+
+#We fetch MSFs, which are also kept seperately - and append this to tickets.txt again
+content=$(curl -f --cookie cookies.txt https://lifelong.rcoa.ac.uk/msf)
+grep -Eo "https://lifelong.rcoa.ac.uk/msf/\S+?\"" <<< $content >> tickets.txt
+
+#We fetch ARCP outcomes, which are also kept seperately - and store as arcp.txt
+content=$(curl -f --cookie cookies.txt https://lifelong.rcoa.ac.uk/arcp/outcomes)
+grep -Eo "https://lifelong.rcoa.ac.uk/arcp/\S+?\"" <<< $content >> arcp.txt
+
+#We generate a list of all submitted documents from the document store, saving to docst.txt, rather than tickets.txt (handled differently below); looping until end of library
+while [ $a -le 0 ]
+do
+doccontent=$(curl -f --cookie cookies.txt $docbase$dp)
+grep -Eo "https://lifelong.rcoa.ac.uk/documents/download/\S+?\"" <<< $doccontent >> docst.txt
+((dp++))
+if echo "$doccontent" | grep -q "You have no documents"; then
+((a++))
+fi
+done
+
+#Lazily, we transform the ARCP list in two stages (adding .pdf, and altering the stored URL)
+sed -i 's/.....$/pdf/' arcp.txt
+sed -i 's/.*outcome\//https:\/\/lifelong.rcoa.ac.uk\/formSubmission\//' arcp.txt
+
+#Also lazily, we transform the tickets.txt list and docst list in a similar manner
+sed -i 's/.$/\/pdf/' tickets.txt
+sed -i 's/.$//' docst.txt
+
+#We append ARCP.txt to tickets.txt to generate a download list
+cat arcp.txt >> tickets.txt
+
+#We evaluate the number of links generate (giving us our loop limit for our download loop)
+pdfwc=$(wc -l tickets.txt | awk '{ print $1 }')
+echo $pdfwc
+
+#We create directories to store the relevant files in
+[ -d PDFs ] || mkdir PDFs
+[ -d Docstore ] || mkdir Docstore
+
+#We loop within the confines of the list length, generating a name for the downloads accordingly, before attempting to fetch each generate URL in tickets.txt
+while [ $x -le $pdfwc ]
+do
+pdfline=$(cat tickets.txt | sed -n $x'p')
+filename=${pdfline%/*}
+filename=${filename##*/}
+filename=${filename}".pdf"
+echo $filename
+curl -f --cookie cookies.txt --output PDFs/$filename $pdfline
+((x++))
+done
+
+#We repeat for the doc store - looking at the list length, giving us the loop limit for the doc store download
+docwc=$(wc -l docst.txt | awk '{ print $1 }')
+echo $docwc
+
+#We loop within the list length, generating download names, before attempting to fetch each generated URL in docst.txt
+while [ $b -le $docwc ]
+do
+docline=$(cat docst.txt | sed -n $b'p')
+docname=${docline##*/}
+echo $docname
+curl -Lf --cookie cookies.txt --output Docstore/$docname $docline
+((b++))
+done
+
+#We try to clean up after ourselves
+rm -f tickets.txt
+rm -f docst.txt
+rm -f arcp.txt
